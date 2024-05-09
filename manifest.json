@@ -10,7 +10,8 @@
         "sizes": "192x192",
         "type": "image/png"
       }],
-  "start_url": "index.html",
-  "display": "browser",
+  "scope": "/cphw-web/",
+  "start_url": "/cphw-web/",
+  "display": "standalone",
   "orientation": "portrait"
 }
