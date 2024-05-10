@@ -5,8 +5,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>wheel</title>
-    <link rel="manifest" href="manifest.json">
     <link rel="icon" href="images/favicon.ico">
+    <link rel="manifest" href="manifest.json">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
         integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.min.js"
@@ -33,24 +33,93 @@
             };
         }
 
+        function swapEveryOtherByte(byteArray) {
+            // Loop through the byte array two bytes at a time
+            for (let i = 0; i < byteArray.length - 1; i += 2) {
+                // Swap bytes
+                const temp = byteArray[i];
+                byteArray[i] = byteArray[i + 1];
+                byteArray[i + 1] = temp;
+            }
+            return byteArray;
+        }
+
+        function crc16(data) {
+            let crc = 0;
+            let out = 0;
+            let bitFlag;
+            let thisByte;
+            let bitsRead = 0;
+            let index = 0;
+
+            // Create a new copy of the data and swap every other byte
+            const newData = swapEveryOtherByte([...data]);
+            let byteLen = newData.length;
+
+            while (byteLen > 0) {
+                bitFlag = out >> 15;
+                out = (out << 1) & 0xFFFF;
+
+                thisByte = newData[index] & 0xFF;
+
+                // Get the next bit from thisByte
+                out = out | ((thisByte >> bitsRead) & 1);
+
+                bitsRead += 1;
+                if (bitsRead > 7) {
+                    bitsRead = 0;
+                    index += 1;
+                    byteLen -= 1;
+                }
+
+                // Apply the CRC polynomial if the shifted-out bit is 1
+                if (bitFlag !== 0) {
+                    out = out ^ 0x8005;
+                }
+            }
+
+            // Push out the last 16 bits
+            for (let i = 0; i < 16; i++) {
+                bitFlag = out >> 15;
+                out = (out << 1) & 0xFFFF;
+                if (bitFlag !== 0) {
+                    out = out ^ 0x8005;
+                }
+            }
+
+            // Reverse the bits in the CRC
+            for (let i = 0; i < 16; i++) {
+                if (out & (1 << i)) {
+                    crc = crc | (1 << (15 - i));
+                }
+            }
+
+            return new Uint8Array([(crc & 0xFF), (crc >> 8)]);
+        }
+
         class Cphw {
             static CPHW_SERVICE_UUID = '52756265-6e43-6167-6e69-654350485000'
             static CPHW_OTHER_UUID = '52756265-6e43-6167-6e69-654350485001'
+            static RIDE_MODE_UUID = '52756265-6e43-6167-6e69-65435048500a'
             static CPHW_BATTERY_UUID = '52756265-6e43-6167-6e69-65435048500b'
             static CPHW_SERVICE_UUID_100 = '52756265-6e43-6167-6e69-654350485100'
             static AUTH_REQUEST_UUID = '52756265-6e43-6167-6e69-654350485101'
             static AUTH_STATUS_UUID = '52756265-6e43-6167-6e69-654350485104'
             static BOARD_SERIAL_UUID = '52756265-6e43-6167-6e69-654350485105'
 
+            static TURBO = "7f55007d00000000804040ffd50000000001"
+            static STANDARD = "40401e00000000007f7f7f7f7f0000000001"
+            static ECO = "20200a00000000007f7f7f7f7f0000000001"
+
             constructor() {
                 this.device = null;
                 this.onDisconnected = this.onDisconnected.bind(this);
                 this.onBatteryChanged = this.onBatteryChanged.bind(this);
                 this.serial = '';
-                this.eraseData = [];
-                this.programBlocks = [];
-                this.updateState = 'init';
                 this.activeBlock = 0;
+                this.passcodes = [];
+
+                this.getPasscodes();
             }
 
             async request() {
@@ -114,9 +183,20 @@
             }
 
             onBatteryChanged(event) {
-                console.log(buf2hex(event.target.value.buffer));
+                // console.log(buf2hex(event.target.value.buffer));
                 var soc = event.target.value.getUint8(7);
                 document.querySelector('#batteryLevel').innerText = soc;
+            }
+
+            async getPasscodes() {
+                return fetch('./passcodes.csv')
+                    .then(rsp => {
+                        return rsp.text();
+                    })
+                    .then(lines => {
+                        this.passcodes = lines.split('\n');
+                    })
+                    .catch(error => console.log(error));
             }
 
             async authenticate() {
@@ -125,14 +205,8 @@
                         const decoder = new TextDecoder();
                         this.serial = decoder.decode(value.buffer.slice(0, 14))
                         console.log("serial: " + this.serial)
-                        return fetch('./passcodes.csv');
-                    })
-                    .then(rsp => {
-                        return rsp.text();
-                    })
-                    .then(lines => {
                         var passcode = 'FF'
-                        for (let line of lines.split('\n')) {
+                        for (let line of this.passcodes) {
                             if (line.split(',')[0] == this.serial) {
                                 passcode = line.split(',')[1];
                                 break
@@ -157,13 +231,29 @@
                 console.log('connected');
                 await this.authenticate();
                 this.startBatteryNotifications(this.onBatteryChanged);
-                // await this.disconnect();
             }
 
-            setRideMode(mode) {
-                console.log(mode)
-            }
+            async setRideMode(mode) {
+                var b = hexToBytes(Cphw.TURBO);
 
+                switch (mode) {
+                    case "std":
+                        b = hexToBytes(Cphw.STANDARD);
+                        break;
+                    case "eco":
+                        b = hexToBytes(Cphw.ECO);
+                        break;
+                    default:
+                        break;
+                }
+
+                var crc = crc16(b);
+                var data = new Uint8Array([...b, ...crc])
+                console.log('writing ' + buf2hex(data.buffer));
+                return this.device.gatt.getPrimaryService(Cphw.CPHW_SERVICE_UUID)
+                    .then(service => service.getCharacteristic(Cphw.RIDE_MODE_UUID))
+                    .then(characteristic => characteristic.writeValue(data))
+            }
         }
 
         var cphw = new Cphw();
